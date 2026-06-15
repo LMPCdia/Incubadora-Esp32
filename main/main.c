@@ -2,8 +2,51 @@
  * ========================================================================
  *  Fecha hora y cambios realizados
  * ========================================================================
- *  2026-06-14 - Refactor a arquitectura multi-tarea + fix DS18B20
  *
+ *  -------------------------------------------------------------------
+ *  2026-06-15 - WiFi provisioning APSTA + UI rediseñada + Vercel
+ *  -------------------------------------------------------------------
+ *  Motivacion: poder controlar la incubadora desde una pagina web
+ *  hosteada en Vercel (acceso por internet) y dejar de depender del
+ *  SoftAP fijo para uso normal.
+ *
+ *  Cambios:
+ *   - wifi_ap.c/h reemplazado por wifi_mgr.c/h:
+ *       * Modo APSTA: SoftAP siempre activo (192.168.4.1) + cliente STA
+ *         si hay credenciales guardadas en NVS (namespace "wifi_creds").
+ *       * Si STA no se conecta tras 6 reintentos pasa a STA_FAILED pero
+ *         el AP queda disponible para reconfigurar.
+ *       * Aplicacion de credenciales nuevas SIN reboot (set_config +
+ *         esp_wifi_connect en caliente).
+ *
+ *   - web_server.c:
+ *       * 3 endpoints nuevos:
+ *           GET  /wifi/status  -> JSON {state, ssid, ip, rssi}
+ *           POST /wifi         -> body ssid=X&pass=Y, guarda en NVS
+ *           POST /wifi/forget  -> borra credenciales
+ *       * CORS (Access-Control-Allow-Origin: *) en /api y /setpoint
+ *         para que la UI de Vercel pueda hacer fetch cross-origin.
+ *       * Handlers OPTIONS para preflight.
+ *       * La pagina HTML se embebe via EMBED_FILES desde ../web/index.html
+ *         (single source of truth: el mismo archivo va al ESP32 y a Vercel).
+ *
+ *   - web/index.html (nueva UI):
+ *       * Rediseño completo: tematica incubadora microbiologica,
+ *         glassmorphism, color de fondo que muta segun (Tmed - Tset)
+ *         (azul=frio, verde=en setpoint, naranja/rojo=sobre-temp).
+ *       * Presets: Ambiente 25, Levaduras 30, E.coli 37, Termofilos 42.
+ *       * Modal de settings con dos secciones:
+ *           (1) URL base del ESP32 (para uso desde Vercel).
+ *           (2) Provisioning WiFi: SSID + pass + status en vivo.
+ *       * Modo demo automatico si /api no es alcanzable (datos simulados).
+ *
+ *   - main/CMakeLists.txt:
+ *       * EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../web/index.html"
+ *       * SRCS: wifi_ap.c -> wifi_mgr.c
+ *
+ *  -------------------------------------------------------------------
+ *  2026-06-14 - Refactor a arquitectura multi-tarea + fix DS18B20
+ *  -------------------------------------------------------------------
  *  Motivacion: el DS18B20 retornaba constantemente "no responde al reset".
  *  El analisis mostro dos problemas combinados:
  *    (a) El driver hacia gpio_set_direction() en cada bit. Cada cambio de
@@ -19,6 +62,10 @@
  *       * Toda transaccion OneWire envuelta en portENTER_CRITICAL para que
  *         las ISRs de WiFi no estiren el timing.
  *       * Validacion CRC8 del scratchpad antes de aceptar la temperatura.
+ *
+ *   - ds18b20_probe.c/h (nuevo): diagnostico bit-level del bus OneWire
+ *     para debugging del sensor. Imprime un "oscilograma" ASCII de los
+ *     niveles muestreados despues del pulso de reset.
  *
  *   - main.c (este archivo): separacion de responsabilidades en tareas
  *     FreeRTOS independientes:
