@@ -535,6 +535,45 @@
   }
   .modal .btn-ghost:hover { color: var(--ink); }
 
+  /* Separador entre secciones del modal */
+  .divider {
+    height: 1px;
+    background: var(--card-bd);
+    margin: 22px -22px 18px;
+  }
+
+  /* Caja de estado WiFi en el modal */
+  .wifi-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--card-bd);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+  .wifi-status .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--mute);
+    flex-shrink: 0;
+  }
+  .wifi-status.connected .dot { background: var(--calm); box-shadow: 0 0 8px var(--calm); }
+  .wifi-status.connecting .dot { background: var(--warm); animation: pulse 1.2s ease-in-out infinite; }
+  .wifi-status.failed .dot    { background: var(--hot); box-shadow: 0 0 8px var(--hot); }
+  .wifi-status code {
+    background: rgba(255,255,255,0.06);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    color: var(--mood);
+    transition: color 600ms ease;
+  }
+
   /* Banner de modo demo */
   .demo-banner {
     background: linear-gradient(90deg, rgba(90,160,255,0.15), rgba(98,197,255,0.08));
@@ -677,17 +716,40 @@
 <!-- MODAL SETTINGS ------------------------------------------------------- -->
 <div class="modal-bg" id="modalBg">
   <div class="modal">
+
+    <!-- Seccion 1: API URL -->
     <h2>Conectar al ESP32</h2>
-    <p>Ingresá la URL base donde está corriendo tu incubadora. Si dejás vacío usa la misma URL desde la que cargaste la página (modo embebido).</p>
+    <p>URL base de tu incubadora. Vacío = misma URL desde la que cargaste la página (modo embebido).</p>
     <label>URL base</label>
     <input type="text" id="apiUrl" placeholder="http://192.168.4.1">
-    <p style="margin-top:14px;font-size:0.78rem;color:#9aa4b8;">
-      <b>Aviso mixed-content:</b> si esta página corre en HTTPS (Vercel) y el ESP32 en HTTP, el browser puede bloquear el fetch. Permitilo en la configuración del sitio o accedé directamente al ESP32.
+
+    <!-- Seccion 2: WiFi del ESP32 -->
+    <div class="divider"></div>
+    <h2 style="margin-top:0;">WiFi del ESP32</h2>
+    <p>Configurá las credenciales de tu red WiFi de casa. El ESP32 se va a conectar y vas a poder acceder a él desde cualquier lugar de tu LAN.</p>
+
+    <div id="wifiStatusBox" class="wifi-status">
+      <span class="dot"></span><span id="wifiStatusTxt">Consultando estado...</span>
+    </div>
+
+    <label>SSID</label>
+    <input type="text" id="wifiSsid" placeholder="MiRedWiFi" autocomplete="off">
+    <label>Contraseña</label>
+    <input type="password" id="wifiPass" placeholder="(vacío si la red es abierta)" autocomplete="off">
+
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <button class="btn-ghost" id="btnWifiForget" style="flex:0 0 auto;">Olvidar</button>
+      <button class="btn" id="btnWifiConnect" style="flex:1;">Conectar</button>
+    </div>
+
+    <p style="margin-top:18px;font-size:0.78rem;color:#9aa4b8;">
+      <b>Aviso mixed-content:</b> si esta página corre en HTTPS (Vercel) y el ESP32 en HTTP, el browser bloquea el fetch. Permitilo en la config del sitio o accedé directo por la IP del ESP32.
     </p>
+
     <div class="modal-actions">
       <button class="btn-ghost" id="btnDemo">Modo demo</button>
-      <button class="btn-ghost" id="btnCancel">Cancelar</button>
-      <button class="btn" id="btnSave">Guardar</button>
+      <button class="btn-ghost" id="btnCancel">Cerrar</button>
+      <button class="btn" id="btnSave">Guardar URL</button>
     </div>
   </div>
 </div>
@@ -890,6 +952,7 @@ document.querySelectorAll('.preset').forEach(b => {
 $('btnGear').addEventListener('click', () => {
   $('apiUrl').value = apiBase();
   $('modalBg').classList.add('open');
+  refreshWifiStatus();      // consulta estado actual al abrir
 });
 $('btnCancel').addEventListener('click', () => $('modalBg').classList.remove('open'));
 $('btnSave').addEventListener('click', () => {
@@ -903,6 +966,94 @@ $('btnSave').addEventListener('click', () => {
 $('btnDemo').addEventListener('click', () => {
   enableDemo();
   $('modalBg').classList.remove('open');
+});
+
+/* ===================================================================
+ *  WiFi provisioning
+ * =================================================================== */
+async function refreshWifiStatus() {
+  const box = $('wifiStatusBox');
+  const txt = $('wifiStatusTxt');
+  box.className = 'wifi-status';
+  if (demoMode) {
+    txt.innerHTML = '<i>Modo demo</i> &mdash; no hay ESP32 conectado';
+    return;
+  }
+  try {
+    const r = await fetch(apiUrl('/wifi/status'), { cache: 'no-store' });
+    const j = await r.json();
+    switch (j.state) {
+      case 'connected':
+        box.classList.add('connected');
+        txt.innerHTML = `Conectado a <code>${j.ssid}</code> &middot; IP <code>${j.ip}</code> &middot; ${j.rssi} dBm`;
+        break;
+      case 'connecting':
+        box.classList.add('connecting');
+        txt.innerHTML = `Conectando a <code>${j.ssid}</code>...`;
+        break;
+      case 'failed':
+        box.classList.add('failed');
+        txt.innerHTML = `Falla al conectar a <code>${j.ssid}</code> &mdash; revisá credenciales`;
+        break;
+      default:
+        txt.innerHTML = 'Solo AP activo &mdash; no hay red WiFi configurada';
+    }
+    // Sugerir el SSID actual en el input si esta vacio
+    if (j.ssid && !$('wifiSsid').value) $('wifiSsid').value = j.ssid;
+  } catch (e) {
+    txt.innerHTML = 'No se pudo consultar el estado &mdash; ¿URL del ESP32 correcta?';
+  }
+}
+
+$('btnWifiConnect').addEventListener('click', async () => {
+  const ssid = $('wifiSsid').value.trim();
+  const pass = $('wifiPass').value;
+  if (!ssid) { $('wifiSsid').focus(); return; }
+  if (demoMode) {
+    alert('En modo demo no se pueden configurar credenciales reales.');
+    return;
+  }
+  const btn = $('btnWifiConnect');
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Enviando...';
+  try {
+    const body = 'ssid=' + encodeURIComponent(ssid)
+               + '&pass=' + encodeURIComponent(pass);
+    const r = await fetch(apiUrl('/wifi'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (!r.ok) throw new Error('http ' + r.status);
+    // Poll cada 1.5s por 20s para ver si conecta
+    btn.textContent = 'Conectando...';
+    for (let i = 0; i < 14; i++) {
+      await new Promise(res => setTimeout(res, 1500));
+      await refreshWifiStatus();
+      const txt = $('wifiStatusTxt').textContent || '';
+      if (txt.includes('Conectado')) break;
+      if (txt.includes('Falla')) break;
+    }
+  } catch (e) {
+    alert('No se pudo enviar las credenciales: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+    $('wifiPass').value = '';
+  }
+});
+
+$('btnWifiForget').addEventListener('click', async () => {
+  if (!confirm('Borrar las credenciales WiFi guardadas en el ESP32?')) return;
+  try {
+    await fetch(apiUrl('/wifi/forget'), { method: 'POST' });
+    $('wifiSsid').value = '';
+    $('wifiPass').value = '';
+    setTimeout(refreshWifiStatus, 500);
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
 });
 
 /* ===================================================================

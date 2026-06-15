@@ -64,7 +64,7 @@
 #include "ds18b20.h"
 #include "ds18b20_probe.h"
 #include "triac_ctrl.h"
-#include "wifi_ap.h"
+#include "wifi_mgr.h"
 #include "web_server.h"
 
 #include "freertos/FreeRTOS.h"
@@ -373,7 +373,7 @@ void app_main(void)
      * IMPORTANTE: triac_init() engancha la ISR de zero-cross; debe estar
      * arriba para que cuando arranque el control ya este capturando. */
     triac_init();
-    wifi_ap_start();
+    wifi_mgr_start();
     web_server_start();
 
     /* === DIAGNOSTICO POST-WIFI ===

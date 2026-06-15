@@ -18,6 +18,7 @@
 
 #include "web_server.h"
 #include "config.h"
+#include "wifi_mgr.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -130,6 +131,121 @@ static esp_err_t setpoint_post(httpd_req_t *req)
     return httpd_resp_send(req, "OK", 2);
 }
 
+/* ------------ Endpoints WiFi (provisioning) ------------ */
+
+/* GET /wifi/status -> JSON con estado de WiFi:
+ *   { "state": "ap_only|connecting|connected|failed",
+ *     "ssid":  "...",      (vacio si no configurado)
+ *     "ip":    "...",      (vacio si no conectado)
+ *     "rssi":  -54         (0 si no conectado) }
+ */
+static esp_err_t wifi_status_get(httpd_req_t *req)
+{
+    char ssid[33] = {0}, ip[20] = {0};
+    int  rssi = 0;
+    wifi_mgr_get_info(ssid, sizeof(ssid), ip, sizeof(ip), &rssi);
+    wifi_mgr_state_t st = wifi_mgr_get_state();
+
+    const char *state_str = "ap_only";
+    switch (st) {
+        case WIFI_MGR_STA_CONNECTING: state_str = "connecting"; break;
+        case WIFI_MGR_STA_CONNECTED:  state_str = "connected";  break;
+        case WIFI_MGR_STA_FAILED:     state_str = "failed";     break;
+        default: break;
+    }
+
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d}",
+        state_str, ssid, ip, rssi);
+    if (n <= 0) return ESP_FAIL;
+
+    cors_set_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, buf, n);
+}
+
+/* Parsea valor de un campo form-urlencoded "key=...&key2=..." dentro de buf.
+ * Hace url-decoding basico (espacios, %xx).  out queda null-terminated. */
+static bool form_get(const char *body, const char *key,
+                     char *out, size_t out_sz)
+{
+    size_t klen = strlen(key);
+    const char *p = body;
+    while (p && *p) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            p += klen + 1;
+            size_t i = 0;
+            while (*p && *p != '&' && i + 1 < out_sz) {
+                char c = *p++;
+                if (c == '+') c = ' ';
+                else if (c == '%' && p[0] && p[1]) {
+                    char h[3] = { p[0], p[1], 0 };
+                    c = (char)strtol(h, NULL, 16);
+                    p += 2;
+                }
+                out[i++] = c;
+            }
+            out[i] = 0;
+            return true;
+        }
+        /* avanzar al proximo & */
+        const char *amp = strchr(p, '&');
+        if (!amp) break;
+        p = amp + 1;
+    }
+    out[0] = 0;
+    return false;
+}
+
+/* POST /wifi  body "ssid=MiRed&pass=clave123"
+ * Guarda credenciales en NVS y aplica al toque (no requiere reboot).
+ */
+static esp_err_t wifi_post(httpd_req_t *req)
+{
+    char body[160];
+    int len = req->content_len;
+    if (len <= 0 || len >= (int)sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad len");
+        return ESP_FAIL;
+    }
+    int got = httpd_req_recv(req, body, len);
+    if (got <= 0) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv");
+        return ESP_FAIL;
+    }
+    body[got] = 0;
+
+    char ssid[33] = {0}, pass[65] = {0};
+    if (!form_get(body, "ssid", ssid, sizeof(ssid)) || strlen(ssid) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing ssid");
+        return ESP_FAIL;
+    }
+    form_get(body, "pass", pass, sizeof(pass));  /* opcional (red abierta) */
+
+    if (!wifi_mgr_set_credentials(ssid, pass)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "save failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Provisioning OK -> conectando a '%s'", ssid);
+    cors_set_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req,
+        "{\"ok\":true,\"state\":\"connecting\"}",
+        HTTPD_RESP_USE_STRLEN);
+}
+
+/* POST /wifi/forget -> borra credenciales, vuelve a AP-only */
+static esp_err_t wifi_forget_post(httpd_req_t *req)
+{
+    wifi_mgr_clear_credentials();
+    cors_set_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+}
+
 /* ------------ Inicializacion ------------ */
 
 void web_server_start(void)
@@ -140,7 +256,7 @@ void web_server_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 16;
 
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
@@ -148,17 +264,29 @@ void web_server_start(void)
         return;
     }
 
-    httpd_uri_t idx       = {.uri="/",         .method=HTTP_GET,     .handler=index_get};
-    httpd_uri_t api       = {.uri="/api",      .method=HTTP_GET,     .handler=api_get};
-    httpd_uri_t sp        = {.uri="/setpoint", .method=HTTP_POST,    .handler=setpoint_post};
-    httpd_uri_t opt_api   = {.uri="/api",      .method=HTTP_OPTIONS, .handler=options_any};
-    httpd_uri_t opt_sp    = {.uri="/setpoint", .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t idx        = {.uri="/",             .method=HTTP_GET,     .handler=index_get};
+    httpd_uri_t api        = {.uri="/api",          .method=HTTP_GET,     .handler=api_get};
+    httpd_uri_t sp         = {.uri="/setpoint",     .method=HTTP_POST,    .handler=setpoint_post};
+    httpd_uri_t wifi_st    = {.uri="/wifi/status",  .method=HTTP_GET,     .handler=wifi_status_get};
+    httpd_uri_t wifi_set   = {.uri="/wifi",         .method=HTTP_POST,    .handler=wifi_post};
+    httpd_uri_t wifi_fgt   = {.uri="/wifi/forget",  .method=HTTP_POST,    .handler=wifi_forget_post};
+    httpd_uri_t opt_api    = {.uri="/api",          .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t opt_sp     = {.uri="/setpoint",     .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t opt_wifi   = {.uri="/wifi",         .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t opt_wifi_s = {.uri="/wifi/status",  .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t opt_wifi_f = {.uri="/wifi/forget",  .method=HTTP_OPTIONS, .handler=options_any};
 
     httpd_register_uri_handler(srv, &idx);
     httpd_register_uri_handler(srv, &api);
     httpd_register_uri_handler(srv, &sp);
+    httpd_register_uri_handler(srv, &wifi_st);
+    httpd_register_uri_handler(srv, &wifi_set);
+    httpd_register_uri_handler(srv, &wifi_fgt);
     httpd_register_uri_handler(srv, &opt_api);
     httpd_register_uri_handler(srv, &opt_sp);
+    httpd_register_uri_handler(srv, &opt_wifi);
+    httpd_register_uri_handler(srv, &opt_wifi_s);
+    httpd_register_uri_handler(srv, &opt_wifi_f);
 
     ESP_LOGI(TAG, "HTTP server arriba (CORS habilitado)");
 }

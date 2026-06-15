@@ -11,7 +11,7 @@ idf_component_register(
         "ds18b20_probe.c"
         "ONEWire.c"
         "triac_ctrl.c"
-        "wifi_ap.c"
+        "wifi_mgr.c"
         "web_server.c"
     INCLUDE_DIRS
         "."
