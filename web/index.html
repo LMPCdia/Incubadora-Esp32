@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b1018">
+<title>Incubadora microbiológica</title>
+<style>
+  /* ============================================================
+   *  Variables. Cambian dinamicamente segun delta = (tmed - tset)
+   * ============================================================ */
+  :root {
+    --bg-0: #060912;
+    --bg-1: #0d1424;
+    --card: rgba(255,255,255,0.045);
+    --card-bd: rgba(255,255,255,0.08);
+    --ink: #e8eef7;
+    --ink-soft: #aab4c5;
+    --mute: #5b6478;
+    --accent: #5aa0ff;
+
+    /* Colores tematicos -- modificados desde JS segun delta */
+    --hot: #ff4d6d;
+    --warm: #ffa05a;
+    --calm: #3ddc97;
+    --cool: #62c5ff;
+    --cold: #8ad7ff;
+
+    /* Estado actual: varia entre cold/calm/hot */
+    --mood: var(--calm);
+    --mood-glow: rgba(61, 220, 151, 0.35);
+    --mood-bg-1: #0c2018;
+    --mood-bg-2: #060912;
+  }
+
+  /* ============================================================
+   *  Reset + base
+   * ============================================================ */
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-0);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+                 Roboto, "Helvetica Neue", sans-serif;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+
+  /* Fondo dinamico: radial-gradient con color tematico que cambia */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse at top, var(--mood-bg-1) 0%, transparent 55%),
+      radial-gradient(ellipse at bottom, var(--mood-bg-2) 0%, var(--bg-0) 70%);
+    transition: background 1200ms ease;
+    z-index: -2;
+  }
+
+  /* Resplandor sutil detras del header */
+  body::after {
+    content: "";
+    position: fixed;
+    top: -10%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60vmax;
+    height: 60vmax;
+    background: radial-gradient(circle, var(--mood-glow) 0%, transparent 60%);
+    filter: blur(60px);
+    opacity: 0.55;
+    transition: background 1200ms ease, opacity 1200ms ease;
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  .app {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px 18px 80px;
+  }
+
+  /* ============================================================
+   *  Header
+   * ============================================================ */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 22px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 600;
+    font-size: 1.05rem;
+    letter-spacing: 0.2px;
+  }
+  .brand .logo {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--mood) 0%, var(--accent) 100%);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 6px 20px var(--mood-glow);
+    transition: background 800ms ease, box-shadow 800ms ease;
+  }
+  .brand .logo svg { width: 18px; height: 18px; color: #fff; }
+  .brand .title { line-height: 1.1; }
+  .brand .subtitle {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    font-weight: 400;
+    margin-top: 2px;
+  }
+
+  .status-pills {
+    display: flex;
+    gap: 6px;
+  }
+  .pill-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07);
+    font-size: 0.7rem;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .pill-status .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--mute);
+    box-shadow: 0 0 8px transparent;
+    transition: all 300ms ease;
+  }
+  .pill-status.ok .dot {
+    background: var(--calm);
+    box-shadow: 0 0 8px var(--calm);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  .pill-status.err .dot {
+    background: var(--hot);
+    box-shadow: 0 0 8px var(--hot);
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ============================================================
+   *  Card base (glass)
+   * ============================================================ */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-bd);
+    border-radius: 22px;
+    padding: 22px;
+    margin-bottom: 16px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow:
+      0 8px 32px rgba(0,0,0,0.4),
+      inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  .label {
+    color: var(--ink-soft);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-weight: 500;
+    margin-bottom: 10px;
+  }
+
+  /* ============================================================
+   *  Card principal de temperatura (la estrella visual)
+   * ============================================================ */
+  .temp-card {
+    position: relative;
+    overflow: hidden;
+    padding: 26px 24px 18px;
+    border: 1px solid var(--card-bd);
+  }
+  /* Halo interno que cambia con la temperatura */
+  .temp-card::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, var(--mood) 0%, transparent 60%);
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    opacity: 0.6;
+    pointer-events: none;
+    transition: background 800ms ease;
+  }
+
+  .temp-main {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 6px;
+  }
+  .temp-value {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    line-height: 1;
+  }
+  .temp-value .num {
+    font-size: 4.4rem;
+    font-weight: 200;
+    letter-spacing: -2px;
+    background: linear-gradient(180deg, #fff 0%, var(--mood) 130%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    transition: background 800ms ease;
+  }
+  .temp-value .unit {
+    font-size: 1.6rem;
+    color: var(--ink-soft);
+    font-weight: 300;
+    margin-bottom: 8px;
+  }
+  .temp-meta {
+    text-align: right;
+    color: var(--ink-soft);
+    font-size: 0.85rem;
+  }
+  .temp-meta .setp { color: var(--ink); font-weight: 600; font-size: 1.05rem; }
+  .temp-meta .delta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--mood-glow);
+    color: var(--mood);
+    font-weight: 600;
+    font-size: 0.75rem;
+    transition: all 400ms ease;
+  }
+
+  /* Sparkline -- ocupa todo el ancho del card */
+  .spark-wrap {
+    margin-top: 18px;
+    height: 80px;
+    position: relative;
+  }
+  .spark-wrap svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    overflow: visible;
+  }
+  .spark-fill { fill: url(#sparkGrad); opacity: 0.4; }
+  .spark-line {
+    fill: none;
+    stroke: var(--mood);
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 6px var(--mood-glow));
+    transition: stroke 800ms ease;
+  }
+  .spark-dot {
+    fill: var(--mood);
+    transition: fill 800ms ease;
+  }
+
+  /* ============================================================
+   *  Setpoint
+   * ============================================================ */
+  .setpoint-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .setpoint-num {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--card-bd);
+    border-radius: 12px;
+    color: var(--ink);
+    padding: 10px 12px;
+    font-size: 1.15rem;
+    font-weight: 600;
+    width: 90px;
+    text-align: center;
+    outline: none;
+    -moz-appearance: textfield;
+  }
+  .setpoint-num::-webkit-outer-spin-button,
+  .setpoint-num::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .setpoint-num:focus {
+    border-color: var(--mood);
+    box-shadow: 0 0 0 3px var(--mood-glow);
+  }
+  .btn {
+    background: linear-gradient(135deg, var(--mood) 0%, var(--accent) 120%);
+    color: #fff;
+    font-weight: 600;
+    border: 0;
+    border-radius: 12px;
+    padding: 11px 18px;
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: transform 120ms ease, box-shadow 200ms ease, background 600ms ease;
+    box-shadow: 0 6px 18px var(--mood-glow);
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:hover { box-shadow: 0 8px 26px var(--mood-glow); }
+
+  /* Slider custom */
+  input[type=range].slider {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    height: 8px;
+    background: linear-gradient(90deg,
+      var(--cold) 0%, var(--cool) 25%, var(--calm) 50%,
+      var(--warm) 75%, var(--hot) 100%);
+    border-radius: 999px;
+    outline: none;
+    cursor: pointer;
+  }
+  input[type=range].slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #fff;
+    border: 3px solid var(--mood);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    cursor: grab;
+    transition: transform 120ms ease, border-color 600ms ease;
+  }
+  input[type=range].slider::-webkit-slider-thumb:active { transform: scale(1.15); cursor: grabbing; }
+  input[type=range].slider::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #fff;
+    border: 3px solid var(--mood);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    cursor: grab;
+  }
+
+  /* Presets */
+  .presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .preset {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--card-bd);
+    border-radius: 14px;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: all 200ms ease;
+    text-align: left;
+  }
+  .preset:hover {
+    background: rgba(255,255,255,0.08);
+    transform: translateY(-1px);
+  }
+  .preset:active { transform: scale(0.97); }
+  .preset .pname {
+    font-weight: 600;
+    font-size: 0.92rem;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .preset .pdesc {
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    margin-top: 3px;
+  }
+  .preset .ptemp {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--mood);
+    margin-top: 6px;
+    transition: color 600ms ease;
+  }
+
+  /* ============================================================
+   *  Card de potencia
+   * ============================================================ */
+  .power-card .power-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .power-val {
+    font-size: 2.4rem;
+    font-weight: 300;
+    letter-spacing: -1px;
+  }
+  .power-val .unit { font-size: 1rem; color: var(--ink-soft); font-weight: 400; margin-left: 4px; }
+  .power-meta { color: var(--ink-soft); font-size: 0.8rem; }
+  .power-meta b { color: var(--ink); font-weight: 600; }
+
+  .power-bar {
+    height: 10px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 999px;
+    overflow: hidden;
+    position: relative;
+  }
+  .power-bar .fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--cold), var(--calm), var(--warm), var(--hot));
+    border-radius: 999px;
+    transition: width 600ms cubic-bezier(0.4, 0.0, 0.2, 1);
+    box-shadow: 0 0 12px var(--mood-glow);
+    width: 0%;
+  }
+
+  /* ============================================================
+   *  Settings (rueda, esquina superior)
+   * ============================================================ */
+  .gear {
+    background: none;
+    border: 1px solid var(--card-bd);
+    color: var(--ink-soft);
+    border-radius: 10px;
+    padding: 7px 9px;
+    cursor: pointer;
+    transition: all 200ms ease;
+  }
+  .gear:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
+  .gear svg { width: 16px; height: 16px; display: block; }
+
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    backdrop-filter: blur(8px);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-bg.open { display: flex; }
+  .modal {
+    background: #0d1424;
+    border: 1px solid var(--card-bd);
+    border-radius: 20px;
+    padding: 22px;
+    max-width: 420px;
+    width: 100%;
+  }
+  .modal h2 {
+    margin: 0 0 6px;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+  .modal p {
+    color: var(--ink-soft);
+    font-size: 0.85rem;
+    margin: 0 0 16px;
+    line-height: 1.45;
+  }
+  .modal label {
+    display: block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--ink-soft);
+    margin-top: 14px;
+    margin-bottom: 6px;
+  }
+  .modal input[type=text] {
+    width: 100%;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--card-bd);
+    border-radius: 10px;
+    color: var(--ink);
+    padding: 10px 12px;
+    font-size: 0.95rem;
+    outline: none;
+  }
+  .modal input[type=text]:focus {
+    border-color: var(--mood);
+    box-shadow: 0 0 0 3px var(--mood-glow);
+  }
+  .modal .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+  }
+  .modal .btn-ghost {
+    background: none;
+    color: var(--ink-soft);
+    border: 1px solid var(--card-bd);
+    border-radius: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  .modal .btn-ghost:hover { color: var(--ink); }
+
+  /* Banner de modo demo */
+  .demo-banner {
+    background: linear-gradient(90deg, rgba(90,160,255,0.15), rgba(98,197,255,0.08));
+    border: 1px solid rgba(90,160,255,0.25);
+    color: #b4d4ff;
+    border-radius: 14px;
+    padding: 10px 14px;
+    font-size: 0.82rem;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .demo-banner svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  /* Pequenos ajustes mobile */
+  @media (max-width: 380px) {
+    .temp-value .num { font-size: 3.6rem; }
+    .presets { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- HEADER ------------------------------------------------------------- -->
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>
+        </svg>
+      </div>
+      <div class="title">
+        Incubadora
+        <span class="subtitle">microbiológica</span>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span id="pillNet"  class="pill-status"><span class="dot"></span> Red</span>
+      <span id="pillSens" class="pill-status"><span class="dot"></span> Sensor</span>
+      <button class="gear" id="btnGear" aria-label="Configurar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- BANNER DEMO -------------------------------------------------------- -->
+  <div id="demoBanner" class="demo-banner" style="display:none;">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="12" y1="8"  x2="12" y2="12"/>
+      <line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    Modo demo: datos simulados. Configurá la IP del ESP32 con el ⚙ para conectar a un equipo real.
+  </div>
+
+  <!-- TEMPERATURA -------------------------------------------------------- -->
+  <div class="card temp-card">
+    <div class="label">Temperatura del cultivo</div>
+    <div class="temp-main">
+      <div class="temp-value">
+        <span class="num" id="tNum">--</span>
+        <span class="unit">°C</span>
+      </div>
+      <div class="temp-meta">
+        Setpoint <span class="setp" id="tSet">--</span> °C
+        <div><span class="delta" id="tDelta">--</span></div>
+      </div>
+    </div>
+
+    <div class="spark-wrap">
+      <svg id="spark" viewBox="0 0 300 80" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="var(--mood)" stop-opacity="0.5"/>
+            <stop offset="100%" stop-color="var(--mood)" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <path class="spark-fill" id="sparkFill"/>
+        <polyline class="spark-line" id="sparkLine"/>
+        <circle class="spark-dot" id="sparkDot" r="3"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- SETPOINT ----------------------------------------------------------- -->
+  <div class="card">
+    <div class="label">Setpoint</div>
+    <div class="setpoint-row">
+      <input type="range" class="slider" id="sl" min="20" max="50" step="0.1" value="37">
+      <input type="number" class="setpoint-num" id="nm" min="20" max="50" step="0.1" value="37">
+      <button class="btn" id="btnApply">Aplicar</button>
+    </div>
+
+    <div class="presets">
+      <button class="preset" data-t="25">
+        <div class="pname">Ambiente</div>
+        <div class="pdesc">Hongos, mohos</div>
+        <div class="ptemp">25.0 °C</div>
+      </button>
+      <button class="preset" data-t="30">
+        <div class="pname">Levaduras</div>
+        <div class="pdesc">S. cerevisiae</div>
+        <div class="ptemp">30.0 °C</div>
+      </button>
+      <button class="preset" data-t="37">
+        <div class="pname">E. coli</div>
+        <div class="pdesc">Bacterias mesófilas</div>
+        <div class="ptemp">37.0 °C</div>
+      </button>
+      <button class="preset" data-t="42">
+        <div class="pname">Termófilos</div>
+        <div class="pdesc">Extremófilos</div>
+        <div class="ptemp">42.0 °C</div>
+      </button>
+    </div>
+  </div>
+
+  <!-- POTENCIA ----------------------------------------------------------- -->
+  <div class="card power-card">
+    <div class="label">Potencia entregada</div>
+    <div class="power-row">
+      <div class="power-val"><span id="pVal">0</span><span class="unit">%</span></div>
+      <div class="power-meta">t<sub>dis</sub> <b id="pTd">0.0</b> ms</div>
+    </div>
+    <div class="power-bar"><div class="fill" id="pFill"></div></div>
+  </div>
+
+</div>
+
+<!-- MODAL SETTINGS ------------------------------------------------------- -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h2>Conectar al ESP32</h2>
+    <p>Ingresá la URL base donde está corriendo tu incubadora. Si dejás vacío usa la misma URL desde la que cargaste la página (modo embebido).</p>
+    <label>URL base</label>
+    <input type="text" id="apiUrl" placeholder="http://192.168.4.1">
+    <p style="margin-top:14px;font-size:0.78rem;color:#9aa4b8;">
+      <b>Aviso mixed-content:</b> si esta página corre en HTTPS (Vercel) y el ESP32 en HTTP, el browser puede bloquear el fetch. Permitilo en la configuración del sitio o accedé directamente al ESP32.
+    </p>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="btnDemo">Modo demo</button>
+      <button class="btn-ghost" id="btnCancel">Cancelar</button>
+      <button class="btn" id="btnSave">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===================================================================
+ *  Estado global y configuracion
+ * =================================================================== */
+const SP_MIN = 20.0;
+const SP_MAX = 50.0;
+const SPARK_N = 120;            // muestras en el sparkline (~2 min a 1 Hz)
+const POLL_MS = 1000;
+const SP_STORAGE = 'incu_api_url';
+
+const buf = [];                  // historial de temperaturas
+let demoMode = false;
+let demoT = 25.0;                // temperatura simulada
+let demoSet = 37.0;
+
+const $ = id => document.getElementById(id);
+
+/* URL base de la API. Si esta vacia, usa la misma del documento (ESP32). */
+function apiBase() {
+  return localStorage.getItem(SP_STORAGE) || '';
+}
+function apiUrl(path) {
+  const base = apiBase();
+  return base ? (base.replace(/\/$/, '') + path) : path;
+}
+
+/* ===================================================================
+ *  Color mood: mapea delta -> tema (cold / cool / calm / warm / hot)
+ * =================================================================== */
+function setMood(delta) {
+  // delta = tmed - tset.  positivo => caliente, negativo => frio
+  let mood, glow, bg1, bg2;
+  const a = Math.abs(delta);
+
+  if (delta > 2.0)      { mood = '#ff4d6d'; bg1 = '#3a0a14'; bg2 = '#1a0508'; }   // hot
+  else if (delta > 0.5) { mood = '#ffa05a'; bg1 = '#2d180a'; bg2 = '#1a0e06'; }   // warm
+  else if (delta < -2.0){ mood = '#8ad7ff'; bg1 = '#0a1f2d'; bg2 = '#040d18'; }   // cold (ice)
+  else if (delta < -0.5){ mood = '#62c5ff'; bg1 = '#0a182d'; bg2 = '#050b18'; }   // cool
+  else                  { mood = '#3ddc97'; bg1 = '#0a2018'; bg2 = '#04120c'; }   // calm
+
+  // alpha glow proporcional a |delta|, mas intenso cuando lejos del setpoint
+  const alpha = Math.min(0.5, 0.18 + a * 0.08);
+  glow = hexToRgba(mood, alpha);
+
+  const r = document.documentElement.style;
+  r.setProperty('--mood', mood);
+  r.setProperty('--mood-glow', glow);
+  r.setProperty('--mood-bg-1', bg1);
+  r.setProperty('--mood-bg-2', bg2);
+}
+
+function hexToRgba(hex, a) {
+  const m = hex.replace('#','');
+  const n = parseInt(m, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+/* ===================================================================
+ *  Sparkline
+ * =================================================================== */
+function drawSpark() {
+  if (buf.length < 2) { $('sparkLine').setAttribute('points', ''); return; }
+  const W = 300, H = 80;
+  const min = Math.min(...buf) - 0.3;
+  const max = Math.max(...buf) + 0.3;
+  const span = (max - min) || 1;
+  const pts = buf.map((v, i) => {
+    const x = (i * W / (SPARK_N - 1)).toFixed(1);
+    const y = (H - (v - min) / span * H).toFixed(1);
+    return `${x},${y}`;
+  });
+  $('sparkLine').setAttribute('points', pts.join(' '));
+  // Fill: line + cierre al baseline
+  const fillPath = `M ${pts[0]} L ${pts.join(' L ')} L ${W},${H} L 0,${H} Z`;
+  $('sparkFill').setAttribute('d', fillPath);
+  // Punto al final
+  const last = pts[pts.length-1].split(',');
+  $('sparkDot').setAttribute('cx', last[0]);
+  $('sparkDot').setAttribute('cy', last[1]);
+}
+
+/* ===================================================================
+ *  Render principal con un snapshot {t, set, pot, td, net, sens}
+ * =================================================================== */
+function render(s) {
+  const t = s.t, tset = s.set;
+  const delta = t - tset;
+
+  $('tNum').textContent  = t.toFixed(2);
+  $('tSet').textContent  = tset.toFixed(1);
+  $('pVal').textContent  = Math.round(s.pot);
+  $('pTd').textContent   = (s.td / 1000).toFixed(1);
+  $('pFill').style.width = Math.round(s.pot) + '%';
+
+  // Delta pill: signo + texto
+  const sign = delta >= 0 ? '↑' : '↓';
+  const txt  = (Math.abs(delta) < 0.05)
+    ? 'En setpoint'
+    : `${sign} ${Math.abs(delta).toFixed(2)}° ${delta>=0?'arriba':'abajo'}`;
+  $('tDelta').textContent = txt;
+
+  // Status pills
+  $('pillNet' ).className = 'pill-status ' + (s.net  ? 'ok' : 'err');
+  $('pillSens').className = 'pill-status ' + (s.sens ? 'ok' : 'err');
+
+  // Buffer + sparkline
+  buf.push(t);
+  if (buf.length > SPARK_N) buf.shift();
+  drawSpark();
+
+  // Color
+  setMood(delta);
+}
+
+/* ===================================================================
+ *  Fetch real al ESP32
+ * =================================================================== */
+async function pollReal() {
+  try {
+    const r = await fetch(apiUrl('/api'), { cache: 'no-store' });
+    const j = await r.json();
+    render(j);
+    hideDemoBanner();
+  } catch (e) {
+    // si falla y no hay URL configurada, no mostramos error visible
+    if (apiBase()) {
+      // Estaba configurado un ESP32 y fallo
+      console.warn('API fetch fallo:', e);
+    }
+  }
+}
+
+/* ===================================================================
+ *  Simulador para modo demo
+ * =================================================================== */
+function tickDemo() {
+  // Simulamos algo realista: temperatura tiende al setpoint con un poco
+  // de ruido y una constante de tiempo larga.
+  const tau = 0.04;                         // suavidad
+  const noise = (Math.random() - 0.5) * 0.15;
+  demoT += (demoSet - demoT) * tau + noise;
+  // calculamos potencia "como si fuera" el ESP32
+  const delta = demoSet - demoT;
+  let t_dis_ms = 10 - delta / 3.0;
+  if (t_dis_ms < 0) t_dis_ms = 0; if (t_dis_ms > 10) t_dis_ms = 10;
+  const ang = Math.PI * t_dis_ms / 10;
+  const pot = (Math.cos(ang) + 1) * 50;
+  render({
+    t: demoT,
+    set: demoSet,
+    pot: pot,
+    td: t_dis_ms * 1000,
+    net: true, sens: true,
+  });
+}
+
+function enableDemo() {
+  demoMode = true;
+  $('demoBanner').style.display = 'flex';
+}
+function hideDemoBanner() {
+  if (!demoMode) $('demoBanner').style.display = 'none';
+}
+
+/* ===================================================================
+ *  Setpoint UI
+ * =================================================================== */
+function setSp(v) {
+  v = Math.max(SP_MIN, Math.min(SP_MAX, parseFloat(v)));
+  $('sl').value = v;
+  $('nm').value = v.toFixed(1);
+}
+function apply() {
+  const v = parseFloat($('nm').value);
+  if (isNaN(v)) return;
+  if (demoMode) { demoSet = v; return; }
+  fetch(apiUrl('/setpoint'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 't=' + v,
+  }).catch(e => console.warn('setpoint fallo', e));
+}
+
+$('sl').addEventListener('input', () => $('nm').value = parseFloat($('sl').value).toFixed(1));
+$('nm').addEventListener('input', () => $('sl').value = $('nm').value);
+$('btnApply').addEventListener('click', apply);
+
+document.querySelectorAll('.preset').forEach(b => {
+  b.addEventListener('click', () => { setSp(b.dataset.t); apply(); });
+});
+
+/* ===================================================================
+ *  Modal settings
+ * =================================================================== */
+$('btnGear').addEventListener('click', () => {
+  $('apiUrl').value = apiBase();
+  $('modalBg').classList.add('open');
+});
+$('btnCancel').addEventListener('click', () => $('modalBg').classList.remove('open'));
+$('btnSave').addEventListener('click', () => {
+  const v = $('apiUrl').value.trim();
+  if (v) localStorage.setItem(SP_STORAGE, v);
+  else   localStorage.removeItem(SP_STORAGE);
+  $('modalBg').classList.remove('open');
+  demoMode = false;
+  $('demoBanner').style.display = 'none';
+});
+$('btnDemo').addEventListener('click', () => {
+  enableDemo();
+  $('modalBg').classList.remove('open');
+});
+
+/* ===================================================================
+ *  Boot
+ * =================================================================== */
+async function probeApi() {
+  // Si estamos servidos por el propio ESP32 (no Vercel) y no hay URL configurada,
+  // asumimos que /api existe localmente.
+  try {
+    const r = await fetch(apiUrl('/api'), { cache: 'no-store' });
+    if (r.ok) { await r.json(); return true; }
+  } catch (e) { /* falla */ }
+  return false;
+}
+
+(async function boot() {
+  const ok = await probeApi();
+  if (ok) {
+    // Modo real, poll cada segundo
+    pollReal();
+    setInterval(pollReal, POLL_MS);
+  } else {
+    // No hay API alcanzable -> arrancamos en demo
+    enableDemo();
+    setInterval(tickDemo, POLL_MS);
+    tickDemo();
+  }
+})();
+</script>
+
+</body>
+</html>

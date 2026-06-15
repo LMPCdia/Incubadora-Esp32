@@ -1,12 +1,19 @@
 /*
  * web_server.c - HTTP server + pagina web embebida
  *
- * La pagina se sirve completa desde la flash (s_index_html).
- * Hace polling a /api cada segundo y muestra:
- *   - temperatura medida (con grafico tipo sparkline)
- *   - setpoint (slider + numero)
- *   - barra de potencia 0..100
- *   - indicador de red y sensor
+ * La pagina vive en web/index.html (un unico archivo HTML+CSS+JS).
+ * Se incrusta en flash via EMBED_FILES (ver main/CMakeLists.txt).
+ *
+ * Endpoints:
+ *   GET  /          -> index.html (la UI)
+ *   GET  /api       -> snapshot JSON con t, set, pot, td, net, sens
+ *   POST /setpoint  -> body "t=37.5" para fijar setpoint
+ *   OPTIONS *       -> CORS preflight (responde con headers permisivos)
+ *
+ * CORS: agregamos Access-Control-Allow-Origin: * en /api y /setpoint
+ * para permitir que la misma UI hosteada en Vercel (HTTPS, otro origen)
+ * pueda hacer fetch al ESP32. El usuario debe permitir mixed-content
+ * en el browser para que el HTTPS de Vercel pueda llamar HTTP del ESP32.
  */
 
 #include "web_server.h"
@@ -28,115 +35,40 @@ static SemaphoreHandle_t s_lock;
 static ctrl_status_t     s_status;
 static float             s_setpoint_c = SETPOINT_DEFAULT_C;
 
-/* ------------ pagina HTML embebida ------------ */
-static const char s_index_html[] =
-"<!DOCTYPE html>"
-"<html lang=\"es\"><head><meta charset=\"utf-8\">"
-"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-"<title>Incubadora ESP32</title>"
-"<style>"
-"  :root{--bg:#0f1620;--card:#1b2533;--ink:#e8eef7;--mut:#7d8aa0;"
-"        --ok:#3ddc97;--warn:#ff8c42;--err:#ff5470;--acc:#5aa0ff;}"
-"  *{box-sizing:border-box}"
-"  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
-"       background:var(--bg);color:var(--ink);padding:16px;max-width:720px;"
-"       margin:auto}"
-"  h1{font-size:1.3rem;margin:0 0 16px;display:flex;align-items:center;gap:8px}"
-"  .dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}"
-"  .dot.ok{background:var(--ok)} .dot.err{background:var(--err)}"
-"  .card{background:var(--card);border-radius:14px;padding:16px;margin:12px 0;"
-"        box-shadow:0 2px 8px rgba(0,0,0,.3)}"
-"  .row{display:flex;justify-content:space-between;align-items:baseline;gap:8px}"
-"  .big{font-size:2.6rem;font-weight:600}"
-"  .unit{color:var(--mut);font-size:1rem}"
-"  .label{color:var(--mut);font-size:.85rem;text-transform:uppercase;"
-"         letter-spacing:.5px}"
-"  .bar{height:14px;background:#0a0f17;border-radius:10px;overflow:hidden;"
-"       margin-top:8px}"
-"  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#3ddc97,"
-"        #ffd166,#ff5470);transition:width .3s}"
-"  input[type=range]{width:100%}"
-"  input[type=number]{width:80px;background:#0a0f17;color:var(--ink);"
-"         border:1px solid #2a3548;border-radius:8px;padding:6px;font-size:1rem}"
-"  button{background:var(--acc);color:#fff;border:0;border-radius:10px;"
-"         padding:10px 18px;font-size:1rem;cursor:pointer}"
-"  button:active{transform:translateY(1px)}"
-"  svg{width:100%;height:100px;display:block}"
-"  .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}"
-"  .pill{background:#0a0f17;border:1px solid #2a3548;border-radius:8px;"
-"        padding:6px 10px;font-size:.85rem;text-align:center}"
-"</style></head><body>"
-"<h1>Incubadora <span id=\"dotNet\" class=\"dot\"></span>"
-"  <span id=\"dotSens\" class=\"dot\"></span></h1>"
+/* HTML embebido desde web/index.html (ver main/CMakeLists.txt) */
+extern const uint8_t index_html_start[] asm("_binary_index_html_start");
+extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
-"<div class=\"card\">"
-"  <div class=\"label\">Temperatura medida</div>"
-"  <div class=\"row\"><div class=\"big\"><span id=\"tmed\">--</span>"
-"    <span class=\"unit\">&deg;C</span></div>"
-"    <div class=\"unit\">setpoint <span id=\"tsetView\">--</span> &deg;C</div></div>"
-"  <svg id=\"plot\" viewBox=\"0 0 300 100\" preserveAspectRatio=\"none\">"
-"    <polyline id=\"line\" fill=\"none\" stroke=\"#5aa0ff\" stroke-width=\"2\"/>"
-"  </svg>"
-"</div>"
+/* ------------ Helpers CORS ------------ */
 
-"<div class=\"card\">"
-"  <div class=\"label\">Setpoint</div>"
-"  <div class=\"row\" style=\"margin:8px 0\">"
-"    <input type=\"range\" id=\"sl\" min=\"20\" max=\"50\" step=\"0.1\" value=\"37.5\">"
-"    <input type=\"number\" id=\"nm\" min=\"20\" max=\"50\" step=\"0.1\" value=\"37.5\">"
-"    <button id=\"go\">Aplicar</button>"
-"  </div>"
-"  <div class=\"grid\">"
-"    <div class=\"pill\" onclick=\"setSp(37.0)\">Pato 37.0&deg;</div>"
-"    <div class=\"pill\" onclick=\"setSp(37.5)\">Gallina 37.5&deg;</div>"
-"    <div class=\"pill\" onclick=\"setSp(38.0)\">Codorniz 38.0&deg;</div>"
-"    <div class=\"pill\" onclick=\"setSp(39.0)\">Canario 39.0&deg;</div>"
-"  </div>"
-"</div>"
+static void cors_set_headers(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin",  "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    httpd_resp_set_hdr(req, "Access-Control-Max-Age",       "600");
+}
 
-"<div class=\"card\">"
-"  <div class=\"label\">Potencia entregada</div>"
-"  <div class=\"row\"><div class=\"big\"><span id=\"pot\">0</span>"
-"    <span class=\"unit\">%</span></div>"
-"    <div class=\"unit\">t<sub>dis</sub> <span id=\"td\">0</span> ms</div></div>"
-"  <div class=\"bar\"><i id=\"barf\" style=\"width:0%\"></i></div>"
-"</div>"
-
-"<script>"
-"const buf=[];const N=120;"
-"const $=id=>document.getElementById(id);"
-"function setSp(v){$(\"sl\").value=v;$(\"nm\").value=v;apply();}"
-"function apply(){const v=parseFloat($(\"nm\").value);"
-"  fetch('/setpoint',{method:'POST',headers:{'Content-Type':"
-"  'application/x-www-form-urlencoded'},body:'t='+v});}"
-"$(\"sl\").oninput=()=>$(\"nm\").value=$(\"sl\").value;"
-"$(\"nm\").oninput=()=>$(\"sl\").value=$(\"nm\").value;"
-"$(\"go\").onclick=apply;"
-"async function refresh(){try{"
-"  const r=await fetch('/api');const j=await r.json();"
-"  $(\"tmed\").textContent=j.t.toFixed(2);"
-"  $(\"tsetView\").textContent=j.set.toFixed(2);"
-"  $(\"pot\").textContent=j.pot.toFixed(0);"
-"  $(\"td\").textContent=(j.td/1000).toFixed(1);"
-"  $(\"barf\").style.width=j.pot.toFixed(0)+'%';"
-"  $(\"dotNet\").className='dot '+(j.net?'ok':'err');"
-"  $(\"dotSens\").className='dot '+(j.sens?'ok':'err');"
-"  buf.push(j.t);if(buf.length>N)buf.shift();"
-"  if(buf.length>1){const min=Math.min.apply(null,buf)-0.5;"
-"    const max=Math.max.apply(null,buf)+0.5;const sp=max-min||1;"
-"    const pts=buf.map((v,i)=>(i*(300/(N-1)))+','+"
-"      (100-(v-min)/sp*100).toFixed(1)).join(' ');"
-"    $(\"line\").setAttribute('points',pts);}"
-"}catch(e){}}"
-"refresh();setInterval(refresh,1000);"
-"</script></body></html>";
+/* Handler OPTIONS para preflight. Algunos browsers mandan preflight para
+ * POST con Content-Type que no sea text/plain (el nuestro es form-urlencoded
+ * que NO requiere preflight, pero igual respondemos por las dudas). */
+static esp_err_t options_any(httpd_req_t *req)
+{
+    cors_set_headers(req);
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
 
 /* ------------ Handlers HTTP ------------ */
 
 static esp_err_t index_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, s_index_html, HTTPD_RESP_USE_STRLEN);
+    /* Cache moderado para que el browser no recargue todo cada vez,
+     * pero permita actualizar tras OTA / reflash. */
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, max-age=60");
+    const size_t len = index_html_end - index_html_start;
+    return httpd_resp_send(req, (const char *)index_html_start, len);
 }
 
 static esp_err_t api_get(httpd_req_t *req)
@@ -157,7 +89,9 @@ static esp_err_t api_get(httpd_req_t *req)
         snap.sensor_ok ? "true" : "false");
     if (n <= 0) return ESP_FAIL;
 
+    cors_set_headers(req);
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, buf, n);
 }
 
@@ -191,6 +125,8 @@ static esp_err_t setpoint_post(httpd_req_t *req)
     xSemaphoreGive(s_lock);
 
     ESP_LOGI(TAG, "Nuevo setpoint: %.2f C", v);
+
+    cors_set_headers(req);
     return httpd_resp_send(req, "OK", 2);
 }
 
@@ -204,7 +140,7 @@ void web_server_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 8;
+    cfg.max_uri_handlers = 12;
 
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
@@ -212,14 +148,19 @@ void web_server_start(void)
         return;
     }
 
-    httpd_uri_t idx  = {.uri="/",         .method=HTTP_GET,  .handler=index_get};
-    httpd_uri_t api  = {.uri="/api",      .method=HTTP_GET,  .handler=api_get};
-    httpd_uri_t sp   = {.uri="/setpoint", .method=HTTP_POST, .handler=setpoint_post};
+    httpd_uri_t idx       = {.uri="/",         .method=HTTP_GET,     .handler=index_get};
+    httpd_uri_t api       = {.uri="/api",      .method=HTTP_GET,     .handler=api_get};
+    httpd_uri_t sp        = {.uri="/setpoint", .method=HTTP_POST,    .handler=setpoint_post};
+    httpd_uri_t opt_api   = {.uri="/api",      .method=HTTP_OPTIONS, .handler=options_any};
+    httpd_uri_t opt_sp    = {.uri="/setpoint", .method=HTTP_OPTIONS, .handler=options_any};
+
     httpd_register_uri_handler(srv, &idx);
     httpd_register_uri_handler(srv, &api);
     httpd_register_uri_handler(srv, &sp);
+    httpd_register_uri_handler(srv, &opt_api);
+    httpd_register_uri_handler(srv, &opt_sp);
 
-    ESP_LOGI(TAG, "HTTP server arriba");
+    ESP_LOGI(TAG, "HTTP server arriba (CORS habilitado)");
 }
 
 void web_server_update_status(const ctrl_status_t *s)
