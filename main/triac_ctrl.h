@@ -31,4 +31,13 @@ bool triac_zc_alive(void);
 /* Contador de cruces por cero (para debug). */
 uint32_t triac_zc_count(void);
 
+/* Modo TEST: fuerza el gate en HIGH continuo durante test_ms milisegundos,
+ * ignorando ZC y control. Util para verificar el lado de potencia
+ * (MOC3021 + TRIAC + carga) aislado del cerebro de control.
+ * Pasale 0 para apagar el modo test manualmente. */
+void triac_force_on(uint32_t test_ms);
+
+/* Devuelve true si esta corriendo el modo test (gate forzado en HIGH). */
+bool triac_in_test_mode(void);
+
 #endif /* TRIAC_CTRL_H */

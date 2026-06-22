@@ -27,23 +27,37 @@ static const char *TAG = "triac";
 
 static esp_timer_handle_t s_fire_timer  = NULL;  /* one-shot: dispara gate */
 static esp_timer_handle_t s_pulse_timer = NULL;  /* one-shot: apaga gate  */
+static esp_timer_handle_t s_test_timer  = NULL;  /* one-shot: termina modo test */
 
-static volatile uint32_t s_delay_us       = 10000; /* arranca apagado */
-static volatile uint32_t s_zc_count       = 0;
+static volatile uint32_t s_delay_us        = 10000; /* arranca apagado */
+static volatile uint32_t s_zc_count        = 0;
 static volatile int64_t  s_last_zc_time_us = 0;
+static volatile bool     s_test_mode       = false;
 
 /* -------- Callbacks de timers (corren en task de esp_timer) -------- */
 
 static void IRAM_ATTR pulse_off_cb(void *arg)
 {
+    /* No apagar el gate si estamos en modo test (mantenerlo HIGH) */
+    if (s_test_mode) return;
     gpio_set_level(PIN_TRIAC_GATE, 0);
 }
 
 static void IRAM_ATTR fire_cb(void *arg)
 {
+    if (s_test_mode) return;          /* en test modo no hacemos pulsos */
     gpio_set_level(PIN_TRIAC_GATE, 1);
     /* Programa el apagado del pulso */
     esp_timer_start_once(s_pulse_timer, TRIAC_PULSE_US);
+}
+
+/* Callback del timer que termina el modo test: apaga gate y vuelve al
+ * control normal. */
+static void test_end_cb(void *arg)
+{
+    s_test_mode = false;
+    gpio_set_level(PIN_TRIAC_GATE, 0);
+    ESP_LOGI(TAG, "Modo TEST terminado - gate vuelve al control");
 }
 
 /* -------- ISR de paso por cero -------- */
@@ -103,8 +117,14 @@ void triac_init(void)
         .name = "triac_pulse",
         .dispatch_method = ESP_TIMER_TASK,
     };
+    const esp_timer_create_args_t test_args = {
+        .callback = &test_end_cb,
+        .name = "triac_test",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
     ESP_ERROR_CHECK(esp_timer_create(&fire_args,  &s_fire_timer));
     ESP_ERROR_CHECK(esp_timer_create(&pulse_args, &s_pulse_timer));
+    ESP_ERROR_CHECK(esp_timer_create(&test_args,  &s_test_timer));
 
     /* ISR service + handler */
     gpio_install_isr_service(0);
@@ -135,4 +155,30 @@ bool triac_zc_alive(void)
 uint32_t triac_zc_count(void)
 {
     return s_zc_count;
+}
+
+void triac_force_on(uint32_t test_ms)
+{
+    /* Cancelar timers en curso para que no se pisen */
+    esp_timer_stop(s_fire_timer);
+    esp_timer_stop(s_pulse_timer);
+    esp_timer_stop(s_test_timer);
+
+    if (test_ms == 0) {
+        /* Apagar manualmente */
+        s_test_mode = false;
+        gpio_set_level(PIN_TRIAC_GATE, 0);
+        ESP_LOGI(TAG, "Modo TEST cancelado");
+        return;
+    }
+
+    s_test_mode = true;
+    gpio_set_level(PIN_TRIAC_GATE, 1);
+    esp_timer_start_once(s_test_timer, (uint64_t)test_ms * 1000ULL);
+    ESP_LOGW(TAG, "Modo TEST: gate forzado HIGH por %u ms", (unsigned)test_ms);
+}
+
+bool triac_in_test_mode(void)
+{
+    return s_test_mode;
 }

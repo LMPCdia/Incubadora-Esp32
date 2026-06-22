@@ -19,6 +19,7 @@
 #include "web_server.h"
 #include "config.h"
 #include "wifi_mgr.h"
+#include "triac_ctrl.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -246,6 +247,39 @@ static esp_err_t wifi_forget_post(httpd_req_t *req)
     return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
+/* POST /triac/test  body "ms=5000"
+ * Fuerza el gate del TRIAC en HIGH continuo durante ms milisegundos
+ * para verificar el hardware downstream del GPIO. Pasar ms=0 para
+ * cancelar el test en curso.
+ *
+ * USO: ponete el multimetro entre GPIO 4 y GND, dispara este endpoint
+ * con ms=5000, en esos 5 segundos el multimetro debe leer ~3.3V firme.
+ * Si lee 3.3V -> control bien, problema en MOC3021/TRIAC/carga.
+ * Si lee 0V o menos de 3.0V -> problema en el GPIO o en el ESP32.
+ */
+static esp_err_t triac_test_post(httpd_req_t *req)
+{
+    char body[32] = {0};
+    int len = req->content_len;
+    if (len > 0 && len < (int)sizeof(body)) {
+        int got = httpd_req_recv(req, body, len);
+        if (got > 0) body[got] = 0;
+    }
+    char ms_str[16] = "0";
+    form_get(body, "ms", ms_str, sizeof(ms_str));
+    long ms = strtol(ms_str, NULL, 10);
+    if (ms < 0)      ms = 0;
+    if (ms > 30000)  ms = 30000;     /* tope de 30 s por seguridad */
+
+    triac_force_on((uint32_t)ms);
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"forced_ms\":%ld}", ms);
+    cors_set_headers(req);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
 /* ------------ Inicializacion ------------ */
 
 void web_server_start(void)
@@ -270,6 +304,8 @@ void web_server_start(void)
     httpd_uri_t wifi_st    = {.uri="/wifi/status",  .method=HTTP_GET,     .handler=wifi_status_get};
     httpd_uri_t wifi_set   = {.uri="/wifi",         .method=HTTP_POST,    .handler=wifi_post};
     httpd_uri_t wifi_fgt   = {.uri="/wifi/forget",  .method=HTTP_POST,    .handler=wifi_forget_post};
+    httpd_uri_t triac_t    = {.uri="/triac/test",   .method=HTTP_POST,    .handler=triac_test_post};
+    httpd_uri_t opt_triac  = {.uri="/triac/test",   .method=HTTP_OPTIONS, .handler=options_any};
     httpd_uri_t opt_api    = {.uri="/api",          .method=HTTP_OPTIONS, .handler=options_any};
     httpd_uri_t opt_sp     = {.uri="/setpoint",     .method=HTTP_OPTIONS, .handler=options_any};
     httpd_uri_t opt_wifi   = {.uri="/wifi",         .method=HTTP_OPTIONS, .handler=options_any};
@@ -282,11 +318,13 @@ void web_server_start(void)
     httpd_register_uri_handler(srv, &wifi_st);
     httpd_register_uri_handler(srv, &wifi_set);
     httpd_register_uri_handler(srv, &wifi_fgt);
+    httpd_register_uri_handler(srv, &triac_t);
     httpd_register_uri_handler(srv, &opt_api);
     httpd_register_uri_handler(srv, &opt_sp);
     httpd_register_uri_handler(srv, &opt_wifi);
     httpd_register_uri_handler(srv, &opt_wifi_s);
     httpd_register_uri_handler(srv, &opt_wifi_f);
+    httpd_register_uri_handler(srv, &opt_triac);
 
     ESP_LOGI(TAG, "HTTP server arriba (CORS habilitado)");
 }
