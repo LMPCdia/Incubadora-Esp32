@@ -96,12 +96,21 @@ void triac_init(void)
     gpio_config(&gate_cfg);
     gpio_set_level(PIN_TRIAC_GATE, 0);
 
-    /* Entrada de paso por cero - flanco de subida */
+    /* Entrada de paso por cero - flanco de subida.
+     *
+     * El SFH620AA es colector-abierto: durante el semiciclo AC activo el
+     * fototransistor conduce y tira la linea a 0V; en el cruce por cero
+     * el fototransistor corta y la linea queda en alta impedancia.
+     * Necesitamos PULL-UP (interno o externo) para que en ese instante
+     * suba a 3.3V y se genere el POSEDGE que dispara la ISR.
+     *
+     * Si tenes un pull-up externo de 10k a 3.3V podes desactivar el interno;
+     * dejarlo habilitado tampoco molesta (~45k en paralelo con el externo). */
     gpio_config_t zc_cfg = {
         .pin_bit_mask = 1ULL << PIN_ZERO_CROSS,
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_POSEDGE,
     };
     gpio_config(&zc_cfg);
