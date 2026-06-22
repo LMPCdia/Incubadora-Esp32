@@ -6,23 +6,32 @@
  *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *  *** BRANCH: feat/bangbang-test (NO MERGEAR A MAIN sin revisar) ***
  *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *  2026-06-22 - Modo bang-bang con histeresis (test sin zero-cross)
+ *  2026-06-22 (rev 2) - Control proporcional con Slow-PWM
  *
- *  Motivacion: probar que el lado de potencia del TRIAC anda aunque la
- *  deteccion de zero-cross este rota. Reemplaza el control proporcional
- *  por un ON/OFF simple con histeresis de 4 C.
+ *  Reemplaza el bang-bang por control proporcional sin necesidad de ZC.
+ *  Usa Slow-PWM sobre el gate del TRIAC:
+ *    - ventana = 5 s
+ *    - duty = error_C * 25%/C, recortado [0, 100%]
+ *    - loop a 4 Hz para resolucion fina del PWM (5%)
+ *    - zona muerta de 0.2 C para evitar oscilacion al setpoint
+ *  Sigue saltando ZC (usa triac_force_on/0).
  *
- *  Cambios:
- *   - main.c control_task: usa triac_force_on() en vez de
- *     triac_set_delay_us(). Salta completamente la ISR de ZC.
- *       * heating ON  -> gate HIGH continuo (TRIAC dispara en cada ZC
- *         natural, equivale a 100% potencia).
- *       * heating OFF -> gate LOW (TRIAC no conduce).
- *       * Histeresis: enciende cuando T < Tset-4 C, apaga al llegar a Tset.
- *       * Mientras heating=true, refresca triac_force_on(2000) cada 1 s
- *         para mantener el modo TEST activo de forma continua.
+ *  Cambios respecto a rev 1 (bang-bang):
+ *    - control_task: bang-bang -> Slow-PWM proporcional.
+ *    - Constantes: CTRL_KP_PERCENT_PER_C, CTRL_PWM_PERIOD_MS,
+ *      CTRL_LOOP_MS, CTRL_DEADBAND_C, CTRL_KEEPALIVE_MS.
+ *    - Log marcado con [P-PWM] una vez por segundo (aunque el loop es 4 Hz).
  *
- *  Para volver al control proporcional original:  git checkout main
+ *  Limitacion conocida: control P puro tiene offset en regimen
+ *  permanente. Si la T final queda > 0.5 C debajo del setpoint,
+ *  agregar termino integral (PI) con anti-windup.
+ *
+ *  2026-06-22 (rev 1) - Modo bang-bang con histeresis (test sin ZC)
+ *  - Reemplazo del control proporcional por ON/OFF con histeresis de 4 C.
+ *  - Sirvio para confirmar que el lado de potencia (MOC3021 + TRIAC +
+ *    calefactor) anda bien y que el problema esta solo en el ZC.
+ *
+ *  Para volver al control de fase original:  git checkout main
  *
  *  -------------------------------------------------------------------
  *  2026-06-15 - WiFi provisioning APSTA + UI rediseñada + Vercel
@@ -290,41 +299,58 @@ static void sensor_task(void *arg)
 }
 
 /* ============================================================
- * Task 2: CONTROL  [BANG-BANG TEST MODE - branch feat/bangbang-test]
+ * Task 2: CONTROL  [PROPORCIONAL SLOW-PWM - branch feat/bangbang-test]
  * ------------------------------------------------------------
- * Control ON/OFF con histeresis. PASA POR ENCIMA del zero-cross
- * usando triac_force_on() para forzar el gate del TRIAC en HIGH
- * continuo. Sirve para verificar el hardware del lado de potencia
- * (MOC3021 + TRIAC + carga) sin depender de la deteccion de ZC.
+ * Control proporcional sin zero-cross usando SLOW-PWM sobre el gate
+ * del TRIAC.
  *
- * Logica:
- *   - Si T_med <= T_set - HYSTERESIS  -> calentar (gate HIGH)
- *   - Si T_med >= T_set                -> apagar  (gate LOW)
- *   - En la banda intermedia: mantener el estado anterior
+ *   error = T_set - T_med
+ *   duty  = clamp(error * Kp, 0, 100) %        si error > DEADBAND
+ *   duty  = 0                                  si error <= DEADBAND
  *
- * Mientras esta calentando, refresca el timer cada 1 s (vence en 2 s)
- * para que el modo TEST se mantenga activo de forma continua.
+ * Slow-PWM:
+ *   - El gate se enciende/apaga en ventanas de CTRL_PWM_PERIOD_MS (5 s).
+ *   - Dentro de cada ventana, esta ON el (duty * 5s) primero, OFF el
+ *     resto. Como la inercia termica del calefactor es de minutos,
+ *     ventanas de segundos son perfectas.
  *
- * Para volver al control proporcional original:
+ * Loop a 4 Hz (250 ms) para tener resolucion fina del PWM (5%) sin
+ * cambiar el periodo total. El sensor solo actualiza a 1 Hz pero esta
+ * task usa la ultima lectura disponible en cada iteracion.
+ *
+ * Limitacion: control P puro tiene offset en regimen permanente. Si
+ * la temperatura final queda > 0.5 C debajo del setpoint, agregar un
+ * termino integral (PI) con anti-windup.
+ *
+ * Para volver al control proporcional original (phase-angle):
  *     git checkout main
  * ============================================================ */
 
-#define BANGBANG_HYSTERESIS_C   4.0f    /* delta para volver a encender */
-#define BANGBANG_KEEPALIVE_MS   2000    /* refresh del modo TEST */
+#define CTRL_KP_PERCENT_PER_C    25.0f   /* ganancia: 25% de duty por C de error */
+#define CTRL_PWM_PERIOD_MS       5000    /* ventana del slow-PWM */
+#define CTRL_LOOP_MS             250     /* periodo del loop de control */
+#define CTRL_DEADBAND_C          0.2f    /* error pequeno -> apaga (evita chasing) */
+#define CTRL_KEEPALIVE_MS        500     /* timeout del modo TEST por refresh */
 
 static void control_task(void *arg)
 {
-    ESP_LOGI(TAG, "control_task arrancando (core %d)  [BANG-BANG TEST MODE]",
-             xPortGetCoreID());
+    ESP_LOGI(TAG, "control_task arrancando (core %d) [P SLOW-PWM Kp=%.0f%%/C]",
+             xPortGetCoreID(), CTRL_KP_PERCENT_PER_C);
 
-    const TickType_t period = pdMS_TO_TICKS(1000);
+    const TickType_t period = pdMS_TO_TICKS(CTRL_LOOP_MS);
     TickType_t last_wake = xTaskGetTickCount();
 
-    /* Estado del bang-bang: false = apagado, true = calentando */
-    bool heating = false;
+    /* Estado del slow-PWM. Trabajamos en tiempo absoluto (esp_timer)
+     * para que la ventana no dependa de la precision del scheduler. */
+    int64_t pwm_window_start_us = esp_timer_get_time();
+    float   current_duty = 0.0f;     /* fijado al inicio de cada ventana */
+    bool    gate_on      = false;
+
+    /* Para imprimir log solo cada 1 s (no cada 250 ms) */
+    int log_skip = 0;
 
     while (1) {
-        /* Leer estado actualizado por sensor_task */
+        /* Leer estado del sensor (actualizado por sensor_task) */
         float    t_med = NAN;
         bool     sensor_ok = false;
         uint32_t age_ms = 0;
@@ -333,67 +359,70 @@ static void control_task(void *arg)
         bool sensor_fresh = sensor_ok && !isnan(t_med) && age_ms < 3000;
         float t_set = web_server_get_setpoint();
 
-        /* Histeresis bang-bang.
-         * IMPORTANTE: si el sensor falla, forzamos apagado (fail-safe). */
-        if (!sensor_fresh) {
-            heating = false;
-        } else {
-            if (heating) {
-                /* Estaba calentando: apagar cuando llega al setpoint */
-                if (t_med >= t_set) {
-                    heating = false;
-                    ESP_LOGW(TAG, "TRIAC OFF: alcanzo setpoint (T=%.2f >= %.2f)",
-                             t_med, t_set);
-                }
-            } else {
-                /* Estaba apagado: encender solo cuando este HYSTERESIS_C
-                 * grados debajo del setpoint */
-                if (t_med <= t_set - BANGBANG_HYSTERESIS_C) {
-                    heating = true;
-                    ESP_LOGW(TAG, "TRIAC ON: T=%.2f cayo bajo %.2f (set-%.1f)",
-                             t_med, t_set - BANGBANG_HYSTERESIS_C,
-                             BANGBANG_HYSTERESIS_C);
-                }
+        /* === Calculo del duty deseado === */
+        float duty_target = 0.0f;
+        float error = 0.0f;
+        if (sensor_fresh) {
+            error = t_set - t_med;
+            if (error > CTRL_DEADBAND_C) {
+                duty_target = error * (CTRL_KP_PERCENT_PER_C / 100.0f);
+                if (duty_target > 1.0f) duty_target = 1.0f;
             }
+            /* error <= deadband -> duty 0 (apagado) */
+        }
+        /* Sensor caido -> duty 0 (fail-safe) */
+
+        /* === Slow-PWM === */
+        int64_t now_us = esp_timer_get_time();
+        int64_t elapsed_ms = (now_us - pwm_window_start_us) / 1000;
+
+        if (elapsed_ms >= CTRL_PWM_PERIOD_MS) {
+            /* Nueva ventana: actualizo el duty para los proximos 5 s */
+            pwm_window_start_us = now_us;
+            elapsed_ms = 0;
+            current_duty = duty_target;
         }
 
-        /* Comando al TRIAC.
-         * - heating = true  -> renovar el modo TEST por 2 s. Como esta task
-         *   corre a 1 Hz, el timer se reinicia antes de vencer y el gate
-         *   queda HIGH continuo.
-         * - heating = false -> apagar el modo TEST (gate LOW).
-         */
-        if (heating) {
-            triac_force_on(BANGBANG_KEEPALIVE_MS);
-        } else {
-            triac_force_on(0);
+        uint32_t on_time_ms = (uint32_t)(current_duty * CTRL_PWM_PERIOD_MS);
+        bool should_be_on = (elapsed_ms < on_time_ms) && (current_duty > 0.0f);
+
+        /* Aplicar al TRIAC (solo si cambia el estado, para no spamear) */
+        if (should_be_on != gate_on) {
+            gate_on = should_be_on;
+            if (gate_on) {
+                triac_force_on(CTRL_KEEPALIVE_MS);
+            } else {
+                triac_force_on(0);
+            }
+        } else if (gate_on) {
+            /* Mantener vivo el modo TEST refrescando el timeout cada loop */
+            triac_force_on(CTRL_KEEPALIVE_MS);
         }
 
-        float pot_pct = heating ? 100.0f : 0.0f;
-
-        /* Snapshot para la UI. En bang-bang no usamos t_dis del control
-         * proporcional; lo ponemos en 0 si esta ON, 10000 us si esta OFF
-         * para que la UI muestre algo coherente. */
+        /* === UI === */
+        float pot_pct = current_duty * 100.0f;
         ctrl_status_t st = {
             .t_med_c      = t_med,
             .t_set_c      = t_set,
             .potencia_pct = pot_pct,
-            .t_dis_us     = heating ? 0 : 10000,
+            .t_dis_us     = gate_on ? 0 : 10000,
             .red_ok       = triac_zc_alive(),
             .sensor_ok    = sensor_fresh,
         };
         web_server_update_status(&st);
 
-        ESP_LOGI(TAG,
-            "[BANG-BANG] T=%.2f C  Tset=%.2f C  delta=%+.2f  HEAT=%s  "
-            "ZC=%u  sensor=%s",
-            isnan(t_med) ? 0.0 : t_med, t_set,
-            isnan(t_med) ? 0.0 : (t_set - t_med),
-            heating ? "ON" : "OFF",
-            (unsigned)triac_zc_count(),
-            sensor_fresh ? "OK" : "FAIL");
+        /* Log cada ~1 s */
+        if (++log_skip >= (1000 / CTRL_LOOP_MS)) {
+            log_skip = 0;
+            ESP_LOGI(TAG,
+                "[P-PWM] T=%.2f Tset=%.2f err=%+.2f duty=%.0f%% gate=%s "
+                "win=%lldms/%dms ZC=%u",
+                isnan(t_med) ? 0.0 : t_med, t_set, error,
+                pot_pct, gate_on ? "ON" : "OFF",
+                elapsed_ms, CTRL_PWM_PERIOD_MS,
+                (unsigned)triac_zc_count());
+        }
 
-        /* Ritmo preciso de 1 Hz */
         vTaskDelayUntil(&last_wake, period);
     }
 }
