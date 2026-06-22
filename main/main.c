@@ -3,6 +3,27 @@
  *  Fecha hora y cambios realizados
  * ========================================================================
  *
+ *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *  *** BRANCH: feat/bangbang-test (NO MERGEAR A MAIN sin revisar) ***
+ *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *  2026-06-22 - Modo bang-bang con histeresis (test sin zero-cross)
+ *
+ *  Motivacion: probar que el lado de potencia del TRIAC anda aunque la
+ *  deteccion de zero-cross este rota. Reemplaza el control proporcional
+ *  por un ON/OFF simple con histeresis de 4 C.
+ *
+ *  Cambios:
+ *   - main.c control_task: usa triac_force_on() en vez de
+ *     triac_set_delay_us(). Salta completamente la ISR de ZC.
+ *       * heating ON  -> gate HIGH continuo (TRIAC dispara en cada ZC
+ *         natural, equivale a 100% potencia).
+ *       * heating OFF -> gate LOW (TRIAC no conduce).
+ *       * Histeresis: enciende cuando T < Tset-4 C, apaga al llegar a Tset.
+ *       * Mientras heating=true, refresca triac_force_on(2000) cada 1 s
+ *         para mantener el modo TEST activo de forma continua.
+ *
+ *  Para volver al control proporcional original:  git checkout main
+ *
  *  -------------------------------------------------------------------
  *  2026-06-15 - WiFi provisioning APSTA + UI rediseñada + Vercel
  *  -------------------------------------------------------------------
@@ -269,26 +290,38 @@ static void sensor_task(void *arg)
 }
 
 /* ============================================================
- * Task 2: CONTROL
+ * Task 2: CONTROL  [BANG-BANG TEST MODE - branch feat/bangbang-test]
  * ------------------------------------------------------------
- * Lee t_med y t_set, calcula t_dis con la ley proporcional del
- * informe, y comanda al modulo TRIAC. Tambien refresca el snapshot
- * que consume la pagina web.
+ * Control ON/OFF con histeresis. PASA POR ENCIMA del zero-cross
+ * usando triac_force_on() para forzar el gate del TRIAC en HIGH
+ * continuo. Sirve para verificar el hardware del lado de potencia
+ * (MOC3021 + TRIAC + carga) sin depender de la deteccion de ZC.
  *
- *   t_dis = SEMICICLO_MS - (Tset - Tmed) / CONTROL_K   [ms]
- *   recortado a [0, SEMICICLO_MS]
+ * Logica:
+ *   - Si T_med <= T_set - HYSTERESIS  -> calentar (gate HIGH)
+ *   - Si T_med >= T_set                -> apagar  (gate LOW)
+ *   - En la banda intermedia: mantener el estado anterior
  *
- *   t_dis=0    => 100% potencia
- *   t_dis=10ms => 0%   potencia
+ * Mientras esta calentando, refresca el timer cada 1 s (vence en 2 s)
+ * para que el modo TEST se mantenga activo de forma continua.
  *
- * Fail-safe: si el sensor no esta OK, t_dis = SEMICICLO_MS (apagado).
+ * Para volver al control proporcional original:
+ *     git checkout main
  * ============================================================ */
+
+#define BANGBANG_HYSTERESIS_C   4.0f    /* delta para volver a encender */
+#define BANGBANG_KEEPALIVE_MS   2000    /* refresh del modo TEST */
+
 static void control_task(void *arg)
 {
-    ESP_LOGI(TAG, "control_task arrancando (core %d)", xPortGetCoreID());
+    ESP_LOGI(TAG, "control_task arrancando (core %d)  [BANG-BANG TEST MODE]",
+             xPortGetCoreID());
 
     const TickType_t period = pdMS_TO_TICKS(1000);
     TickType_t last_wake = xTaskGetTickCount();
+
+    /* Estado del bang-bang: false = apagado, true = calentando */
+    bool heating = false;
 
     while (1) {
         /* Leer estado actualizado por sensor_task */
@@ -297,49 +330,67 @@ static void control_task(void *arg)
         uint32_t age_ms = 0;
         state_get(&t_med, &sensor_ok, &age_ms);
 
-        /* Consideramos el sensor "vivo" si publico algo en los ultimos 3 s */
         bool sensor_fresh = sensor_ok && !isnan(t_med) && age_ms < 3000;
-
-        /* Setpoint actual desde la pagina web */
         float t_set = web_server_get_setpoint();
 
-        /* Ley proporcional */
-        float t_dis_ms = SEMICICLO_MS;   /* fail-safe: apagado */
-        float pot_pct  = 0.0f;
-        if (sensor_fresh) {
-            float delta = t_set - t_med;
-            t_dis_ms = SEMICICLO_MS - delta / CONTROL_K;
-            if (t_dis_ms < 0.0f)         t_dis_ms = 0.0f;
-            if (t_dis_ms > SEMICICLO_MS) t_dis_ms = SEMICICLO_MS;
-
-            /* Potencia entregada (%) -- area de cos^2 desde el angulo de
-             * disparo hasta el final del semiciclo. Aproximacion suave. */
-            float ang = (float)M_PI * t_dis_ms / SEMICICLO_MS;
-            pot_pct = (cosf(ang) + 1.0f) * 50.0f;
+        /* Histeresis bang-bang.
+         * IMPORTANTE: si el sensor falla, forzamos apagado (fail-safe). */
+        if (!sensor_fresh) {
+            heating = false;
+        } else {
+            if (heating) {
+                /* Estaba calentando: apagar cuando llega al setpoint */
+                if (t_med >= t_set) {
+                    heating = false;
+                    ESP_LOGW(TAG, "TRIAC OFF: alcanzo setpoint (T=%.2f >= %.2f)",
+                             t_med, t_set);
+                }
+            } else {
+                /* Estaba apagado: encender solo cuando este HYSTERESIS_C
+                 * grados debajo del setpoint */
+                if (t_med <= t_set - BANGBANG_HYSTERESIS_C) {
+                    heating = true;
+                    ESP_LOGW(TAG, "TRIAC ON: T=%.2f cayo bajo %.2f (set-%.1f)",
+                             t_med, t_set - BANGBANG_HYSTERESIS_C,
+                             BANGBANG_HYSTERESIS_C);
+                }
+            }
         }
 
-        /* Comando al TRIAC: la ISR de zero-cross lo aplicara al
-         * proximo cruce por cero. */
-        uint32_t t_dis_us = (uint32_t)(t_dis_ms * 1000.0f);
-        triac_set_delay_us(t_dis_us);
+        /* Comando al TRIAC.
+         * - heating = true  -> renovar el modo TEST por 2 s. Como esta task
+         *   corre a 1 Hz, el timer se reinicia antes de vencer y el gate
+         *   queda HIGH continuo.
+         * - heating = false -> apagar el modo TEST (gate LOW).
+         */
+        if (heating) {
+            triac_force_on(BANGBANG_KEEPALIVE_MS);
+        } else {
+            triac_force_on(0);
+        }
 
-        /* Snapshot para la UI */
+        float pot_pct = heating ? 100.0f : 0.0f;
+
+        /* Snapshot para la UI. En bang-bang no usamos t_dis del control
+         * proporcional; lo ponemos en 0 si esta ON, 10000 us si esta OFF
+         * para que la UI muestre algo coherente. */
         ctrl_status_t st = {
             .t_med_c      = t_med,
             .t_set_c      = t_set,
             .potencia_pct = pot_pct,
-            .t_dis_us     = t_dis_us,
+            .t_dis_us     = heating ? 0 : 10000,
             .red_ok       = triac_zc_alive(),
             .sensor_ok    = sensor_fresh,
         };
         web_server_update_status(&st);
 
         ESP_LOGI(TAG,
-            "T=%.2f C  Tset=%.2f C  delta=%+.2f  t_dis=%.2f ms  P=%.1f%%  "
+            "[BANG-BANG] T=%.2f C  Tset=%.2f C  delta=%+.2f  HEAT=%s  "
             "ZC=%u  sensor=%s",
             isnan(t_med) ? 0.0 : t_med, t_set,
             isnan(t_med) ? 0.0 : (t_set - t_med),
-            t_dis_ms, pot_pct, (unsigned)triac_zc_count(),
+            heating ? "ON" : "OFF",
+            (unsigned)triac_zc_count(),
             sensor_fresh ? "OK" : "FAIL");
 
         /* Ritmo preciso de 1 Hz */
